@@ -1,0 +1,6 @@
+-- 
+select e.email, min(cast(from_iso8601_timestamp(e.updatetimestamp)  + interval '330' minute as timestamp))
+from cleartax_prod.eventtrackingmodel e
+where (year = 2021 or (year = 2020 and month = 12))
+and category in ('Efiling_Black', 'Save_Black')
+group by 1
