@@ -1,0 +1,57 @@
+with cte1 as (
+select email, createtimestamp  + interval '330' minute as createtimestamp, action, label, referrer, original_referrer, metadata, concat(action,original_referrer) as exception,
+JSON_EXTRACT_SCALAR(metadata, '$.packId') as packNum, JSON_EXTRACT_SCALAR(metadata, '$.fundId') as fundNum, JSON_EXTRACT_SCALAR(metadata, '$.name') as prodname
+from cleartax_prod.apc_black_incremental_v2 
+where (action in ('ScreenView_InvestmentDetails','ScreenView_PersonalDetailsScreen', 'ScreenView_BankDetails', 'ScreenView_NomineeDetails', '_PaymentFailed','_PaymentSuccessful', '_Payment Successful', '_Payment Failed'
+                  ,'ScreenView_FundPage', 'ScreenView_PackScreen')
+                  )
+and original_referrer <> 'ProfileScreen' 
+and date(createtimestamp + interval '330' minute) between date({{start_date}}) and date({{End_date}}) 
+--and month(createtimestamp + interval '330' minute) = 
+group by 1,2,3,4,5,6,7,8,9)
+, cte2 as (
+--select * , case when packNum is null then 0 else CAST(packNum AS bigint) end as packNum2, case when fundNum is null then 0 else CAST(fundNum AS bigint) end as fundNum2  --coalesce(packNum) as packNum2, coalesce(fundNum) as fundNum2 
+select * , case when concat(coalesce(packNum,'0'),coalesce(fundNum,'0')) ='00' then 0 else 1 end as ProdNum  --coalesce(packNum) as packNum2, coalesce(fundNum) as fundNum2 
+from cte1
+where exception not in ('ScreenView_FundPageFundPage','ScreenView_FundPageInvestmentDetails','ScreenView_FundPageBankDetails','ScreenView_FundPageNomineeDetails','ScreenView_FundPagePersonalDetailsScreen',
+                        'ScreenView_PackScreenPackScreen','ScreenView_PackScreenInvestmentDetails','ScreenView_PackScreenBankDetails','ScreenView_PackScreenNomineeDetails','ScreenView_PackScreenPersonalDetailsScreen',
+                        'ScreenView_PackScreenFundPage','ScreenView_PackScreenKycDetails')
+)
+--`group by 1,2,3,4,5,6,7,8,9)
+,cte3 as 
+(select *, sum(ProdNum) over(partition by email order by createtimestamp) as ProdNum2
+from cte2)
+,cte4 as (select *, first_value(original_referrer) over (partition by email, ProdNum2 order by createtimestamp) as userflow_referrer
+from cte3
+where prodnum2 <> 0)
+,final as (select email,createtimestamp,action,label,referrer,original_referrer,metadata,
+       replace(concat(coalesce(packNum,'-'),coalesce(fundNum,'-')),'-') as ProdId, prodname,
+       userflow_referrer,
+       concat(email,'-',cast(ProdNum2 as varchar),'-',userflow_referrer) as userflow_ID
+from cte4
+group by 1,2,3,4,5,6,7,8,9,10,11)
+select  case 
+            when userflow_referrer in ('Dashboard','Dashboard', 'DashboardInvestmentDeatils', 'DashboardSipDeatils', 'InstantRedemption', 'OrderTrackingScreen','RedemptionInputScreen' ) then 'Dashboard' 
+            when userflow_referrer in ('SearchScreen') then 'Discover' 
+            when userflow_referrer in ('Budget Screen', 'ExpandedCard', 'FundPage','Filing') then 'Expanded Card'
+            when userflow_referrer in ('FundList','InvestListing') then 'InvestListing'  
+            when if(prodname is null ,ProdId like '%-',prodname = 'Tax Super Saver') and userflow_referrer in ('EnterMobileNumber','MainScreen','OTPVerifications','Settings') then 'Banner1' 
+            when if(prodname is null ,ProdId like '-%',prodname <> 'Tax Super Saver') and userflow_referrer in ('EnterMobileNumber','MainScreen','OTPVerifications','Settings') then 'Topfunds'
+            when userflow_referrer in ('OrderPlacedScreen') then 'OrderPlacedScreen'
+            when userflow_referrer in ('PackScreen') then 'PackScreen'
+            when userflow_referrer in ('WebScreen') then 'Tax Calculator'
+            when userflow_referrer in ('TaxSavingPlans') then 'TaxSavingPlans'
+            when userflow_referrer in ('FundCompareScreen', 'WatchlistScreen') then 'Watchlist'
+            else 'others'
+        end as flow, month(createtimestamp) as month,
+       count(distinct case when action in ('ScreenView_FundPage', 'ScreenView_PackScreen') then email end) as Fundpage,
+       count(distinct case when action = 'ScreenView_InvestmentDetails' then email end) as Initiated_Investment,
+       count(distinct case when action = 'ScreenView_PersonalDetailsScreen' then email end) as PersonalDetailsScreen,
+       count(distinct case when action = 'ScreenView_BankDetails' then email end) as BankDetails,
+       count(distinct case when action = 'ScreenView_NomineeDetails' then email end) as NomineeDetails,
+       count(distinct case when action in  ('_PaymentFailed','_PaymentSuccessful', '_Payment Successful', '_Payment Failed') then email end ) as Payment_tried,
+       count(distinct case when action in  ('_PaymentSuccessful', '_Payment Successful') then email end ) as Payment_done
+from final
+where email is not null
+group by 1,2
+order by 2,1
