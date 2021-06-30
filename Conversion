@@ -1,0 +1,16 @@
+with base as (
+select date_trunc('day', createtimestamp + interval '330' minute) as date, email,action
+from cleartax_prod.apc_black_incremental_v2 
+where ((year = 2020 and month = 12) or (year = 2021)) and date(createtimestamp + interval '330' minute) between date({{Start_date}}) and date({{End_date}}) 
+and category in ('Efiling_Black', 'Save_Black')
+and action in ('ScreenView_FundPage','ScreenView_PackScreen','ScreenView_MainScreen','_Payment Successful','_PaymentSuccessful'))
+
+select date, 
+            count(distinct case when action in ('ScreenView_FundPage','ScreenView_PackScreen') then email else null end) as Fund_Pack_launches,
+            100*(count(distinct case when action in ('ScreenView_FundPage','ScreenView_PackScreen') then email else null end)*1.0)/(count(distinct case when action in ('ScreenView_MainScreen') then email else null end)) as HP_to_FP_conv,
+            100*(count(distinct case when action in ('_Payment Successful','_PaymentSuccessful') then email else null end)*1.0)/(count(distinct case when action in ('ScreenView_FundPage','ScreenView_PackScreen') then email else null end)) as FP_to_Paymt_conv,
+            100*(count(distinct case when action in ('_Payment Successful','_PaymentSuccessful') then email else null end)*1.0)/(count(distinct case when action in ('ScreenView_MainScreen') then email else null end)) as HP_to_Paymt_conv
+
+from base 
+group by 1
+order by 1 desc
