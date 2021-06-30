@@ -1,0 +1,243 @@
+with UserPersonalDetails as (
+select id, 
+       fullname,
+       dateofbirth,
+       email,
+       pan,
+       phone,
+       date_parse(updated_at,'%Y-%m-%d %H:%i:%s')+ interval '330' minute as updated_at,
+       row_number() over(partition by id order by date_parse(updated_at,'%Y-%m-%d %H:%i:%s') + interval '330' minute desc) as row
+from clearsave_prod.UserPersonalDetails
+where year >= 2016
+group by 1,2,3,4,5,6,7
+)
+
+,Invorder as (
+Select cart_id as inv_cart_id,
+       i.created_at + interval '330' minute as inv_created_at,
+       i.Id as inv_id,
+       ischildorder as inv_ischildorder,
+       orderpurchasetype as inv_orderpurchasetype,
+       orderstatus as inv_ordertatus,
+       ownerkycstatus as inv_ownerkycstatus,
+       payment_id as inv_payment_id,
+       totalamount as inv_totalamount,
+       date_parse(i.updated_at,'%Y-%m-%d %H:%i:%s') + interval '330' minute as inv_updated_at,
+       user_id as inv_user_id,
+       userdetails_id as inv_userdetails_id,
+       userorderintentid as inv_userorderintentid,
+       i.year as inv_year,
+       i.month as inv_month,
+       i.day as inv_month,
+       fullname,
+       dateofbirth,
+       email,
+       pan,
+       phone,
+       im.id as black_id,
+       max(date_parse(i.updated_at,'%Y-%m-%d %H:%i:%s')+ interval '330' minute) over(partition by i.user_id) as max_inv_updated_at
+from clearsave_prod.InvOrder i
+inner join clearsave_prod.UserDetails ud  on i.userDetails_id = ud.id and i.orderStatus IN ('COMPLETED','PAYMENT_COMPLETE')
+inner join UserPersonalDetails upd on upd.id = ud.userPersonalDetails_id and row = 1
+left join clearsave_prod.invordermetadata im on im.id = i.id and im.source_category = 'Black'
+where i.orderStatus IN ('INSTANTREDEEM_SUCCESSFUL','REDEEM_COMPLETED','REDEEM_UNDER_PROCESSING','COMPLETED','PAYMENT_COMPLETE')
+and (i.year >= 2021) and date(i.created_at + interval '330' minute) between date({{Start_Date}}) and date({{End_Date}})
+group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22
+)
+
+,OrderItem as (Select amount as ord_amount,
+                      created_at + interval '330' minute as ord_created_at,
+                      Id as ord_id,
+                      InvOrder_id as ord_invorder_id,
+                      orderitemtype,
+                      product_id as ord_product_id,
+                      urnnumber,
+                      urnstatus, 
+                      trim(concat(coalesce(instantredeemorderitemstatus,''),coalesce(lumpsumorderitemstatus,''),coalesce(siporderitemstatus,''),coalesce(redeemorderitemstatus,''))) as orderstatus,
+                      year as ord_year,
+                      month as ord_month,
+                      day as ord_day,
+                      max(date_parse(updated_at,'%Y-%m-%d %H:%i:%s')+ interval '330' minute) as ord_updated_at
+from clearsave_prod.orderitem
+where amount is not null
+and year >= 2021
+--and InvOrder_id = 1531923
+group by 1,2,3,4,5,6,7,8,9,10,11,12
+)
+
+,final as (
+Select * 
+from Invorder i 
+inner join orderitem o on o.ord_InvOrder_id = i.inv_ID and i.inv_updated_at <= o.ord_updated_at and (date(o.ord_updated_at) between date(i.inv_created_at) - interval '1' day and date(i.inv_created_at) + interval '50' day) 
+)
+
+,transfer as (select date(created_at +interval '330' minute) as created_at,orderitemid,date(date_parse(settlementdate, '%Y-%m-%d')+interval '330' minute) as settlement_date,hour(date_parse(updated_at,'%Y-%m-%d %H:%i:%s') + interval '330' minute) as settlement_hour
+from clearsave_prod.transfer t
+where transferstatus = 'SETTLED'
+group by 1,2,3,4)
+
+,transfer_initiated as (select date(created_at +interval '330' minute) as created_at,orderitemid,
+                               max(date_parse(updated_at,'%Y-%m-%d %H:%i:%s') + interval '330' minute) as initiation_date
+from clearsave_prod.transfer t
+where transferstatus = 'PROCESSING'
+group by 1,2)
+
+,ifp as (
+select product_id, amccode,isincode
+from clearsave_prod.investmentfundproduct
+group by 1,2,3
+)
+
+,mfv2 as (
+select orderitem_id, portfolio_id,nav
+from clearsave_prod. Mutualfundtransactionv2
+where year >= 2021
+group by 1,2,3
+)
+
+,tat as (Select fullname,
+       email,
+       pan,
+       phone,
+       inv_id,
+       inv_created_at,
+       inv_orderpurchasetype,
+       case when inv_ownerkycstatus = 'ALREADY_VERIFIED' then 'Already_verified' else 'not_verified_earlier' end as kycstatus,
+       inv_totalamount,
+       inv_User_id,
+       ord_id,
+       orderitemtype,
+       ord_product_id,
+       urnstatus,
+       ord_created_at as Order_created_at,
+       initiation_date,
+       settlement_date, 
+       settlement_hour,
+       black_id,
+       max(case when orderstatus = 'BLOCKED_BY_OPS' then ord_updated_at end) as Order_blocked_by_OPS,
+       max(case when orderstatus = 'AUTOMATION_FAILURE' then ord_updated_at end) as Order_AUTOMATION_FAILURE,
+       max(case when orderstatus = 'SENT_TO_AMC' then ord_updated_at end) as Order_SENT_TO_AMC,
+       max(case when orderstatus = 'AMC_DECLINE' then ord_updated_at end) as Order_AMC_DECLINE,
+       max(case when orderstatus like '%ADDED' then ord_updated_at end) as Order_Added
+from final
+left join transfer t on t.orderitemid = ord_id
+left join transfer_initiated ti on ti.orderitemid = ord_id
+where inv_ischildorder is null
+group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19
+         --having inv_user_id = 2972884
+)
+
+,tat_final as (
+select tat.*,max(ln.date) as NAV_allocation_date
+from tat
+inner join ifp on ord_product_id = ifp.product_id
+left join mfv2 on ord_id = mfv2.orderitem_id 
+left join mfpages_prod.Dailyfundnav ln on ln.isin = ifp.isincode and round(mfv2.nav,2) = round(ln.nav,2) and date(Order_SENT_TO_AMC) <= date(ln.date) and date(ln.date) <= date(Order_Added)
+group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24
+)
+
+,base as (select date(created_at+ interval '330' minute) as date,day_of_week(created_at+ interval '330' minute) as day_of_week,year,month,day
+from clearsave_prod.InvOrder
+where year >= 2021
+group by 1,2,3,4,5)
+
+,sat_data as (select date,day_of_week,
+       row_number() over(partition by year,month order by day ) as sat_data
+from base
+where day_of_week = 6)
+
+,data as (select b.date,b.day_of_week,sat_data,
+       case when b.day_of_week = 7 or (b.day_of_week = 6 and mod(sat_data, 2) = 0) or ih.date is not null then 0 
+       else 1 end as bank_Working_Day,
+       case when b.day_of_week = 7 then 0 
+       else 1 end as Automated,
+       case when b.day_of_week in (7,6) or ih.date is not null then 0 
+       else 1 end as fund_working_day
+from base b
+left join sat_data s on s.date = b.date
+left join csv_upload_data.Invest_Holiday ih on date(ih.date) = b.date 
+group by 1,2,3,4,5,6)
+
+,bank_working_day as (select date
+from data
+where bank_Working_Day = 1
+group by 1)
+
+,Automated as (select date
+from data
+where Automated = 1
+group by 1)
+
+,fund_working_day as (select date
+from data
+where fund_Working_Day = 1
+group by 1)
+
+,final_data as (select d.date,
+       d.Automated,min(a.date) as automated_date, 
+       d.bank_Working_Day,min(b.date) as bank_working_date,
+       d.fund_Working_Day,min(f.date) as fund_working_date
+from data d
+left join bank_working_day b on b.date >= d.date
+left join Automated a on a.date >= d.date
+left join fund_Working_Day f on f.date >= d.date
+group by 1,2,4,6)
+
+,utr_details_recieved as (select ord_id,count(distinct bank_Working_Date) as utr_details_recieved_ 
+  from final_data fd inner join tat_final tf on fd.date between date(Order_created_at) and date(settlement_date)
+group by 1)
+
+,NAV_allocation_data as (select ord_id,count(distinct fund_Working_Date) as NAV_allocation_data
+  from final_data fd inner join tat_final tf on fd.date between date(settlement_date) and date(NAV_allocation_date)
+group by 1)
+
+,Order_Added_data as (select ord_id,count(distinct fund_Working_Date) as Order_Added_data
+  from final_data fd inner join tat_final tf on fd.date between date(settlement_date) and date(Order_Added)
+group by 1)
+
+,final_2 as (select tf.ord_id,tf.inv_id,
+       email,
+       black_id,
+       Order_created_at,
+       automated_date,
+       initiation_date,
+       settlement_date,
+       Order_SENT_TO_AMC,
+       NAV_allocation_date,
+       Order_Added,
+       date_diff('day',automated_date,Order_SENT_TO_AMC) as file_uploaded,
+       date_diff('day',Order_created_at,initiation_date) as transfer_initiated,
+       utr_details_recieved_ - 1 as utr_details_recieved_,
+       (utr_details_recieved_ - 1)+(NAV_allocation_data - 1) as NAV_allocation_date,
+       (utr_details_recieved_ - 1)+(Order_Added_data - 1) as Order_Added_date
+from tat_final tf 
+left join utr_details_recieved u on u.ord_id = tf.ord_id
+left join NAV_allocation_data n on n.ord_id = tf.ord_id
+left join Order_Added_data o on o.ord_id = tf.ord_id
+inner join final_data fd on fd.date = date(tf.inv_created_at)
+--where Order_Added is not null
+group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16)
+
+,black as (
+select email ,createtimestamp  + interval '330' minute as createtimestamp
+from cleartax_prod.eventtrackingmodel e 
+where ((year = 2020 and month = 12) or (year = 2021)) and date(createtimestamp + interval '330' minute) between date({{Start_Date}}) and date({{End_Date}})
+and category = 'Save_Black'
+and action in ('_PaymentSuccessful' , '_Payment Successful')
+group by 1,2
+)
+         
+Select 
+case when black_id is not null or (b.email is not null and black_id is null) then 'Black Invested'
+else 'Web Invested' end as Invested_On,
+date(order_created_at) as ord_created_date,
+count(distinct inv_id) as inv_purchased,
+count(distinct ord_id) as ord_purchased,
+count(distinct case when Order_Added_date is not null and Order_Added_date < 5 then ord_id end ) as ord_Alloted
+
+from final_2 T
+
+left join black b on t.email = b.email and date_diff('minute', b.createtimestamp, t.order_created_at) between -10 and 10
+where black_id is not null or (b.email is not null and black_id is null)
+group by 1,2
+order by 1,2 desc
