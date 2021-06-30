@@ -1,0 +1,62 @@
+with churn_base as(
+select date(date_parse(i.date,'%d-%m-%Y %H:%i')) as date , count(distinct i."Clevertap ID") as installs,  count(distinct u."Clevertap ID") as uninstalls
+-- cum churn = sum of all uninstalls on that day / sum of all installs till the prev day 
+from csv_upload_data.Black_ClevertapID_uninstalls u
+right join csv_upload_data.Black_Clevertap_ID_installers i on u.date = i.date
+where date_parse(i.date,'%d-%m-%Y %H:%i') between date '2020-12-01' and {{end_date}} -- set beginning to 9 december 2020
+group by 1
+order by 1 desc)
+
+,base as (select a.email,date_parse(a.date,'%d-%m-%Y %H:%i') as date,action,label,createtimestamp + interval '330' minute as createtimestamp,original_referrer
+from csv_upload_data.Black_Clevertap_ID_installers a
+inner join cleartax_prod.apc_black_incremental_v2 b on a.email = b.email
+and ((year = 2020 and month = 12) or (year = 2021)) and date(createtimestamp + interval '330' minute) between date('2020-12-09') and date({{end_date}}) 
+and category in ('Efiling_Black', 'Save_Black')
+where date_parse(a.date,'%d-%m-%Y %H:%i') between date({{start_date}}) and date({{end_date}}) 
+group by 1,2,3,4,5,6)
+
+,bd as (select email, min(date(createtimestamp)) as first_login
+from base 
+group by 1
+having min(date(createtimestamp)) >= date({{start_date}}) )
+
+,existing_ct as (select email, registration_date as createtimestamp
+from cleartax_prod.cleartax_all_users
+union all
+select email, date(min(timestamp)) as createtimestamp
+from clearsave_prod.pageview
+group by 1)
+
+,ct as (select email, min(createtimestamp) as createtimestamp
+from existing_ct
+group by 1)
+
+,user_category as (select a.email,
+                   case when b.email is null then 'New_to_CT'
+                        when b.email is not null then 'Existing_CT' end as user_category
+                   from bd a 
+                   left join ct b on a.email = b.email and a.first_login > b.createtimestamp)
+                   
+,final_per as( select date(b.date) as date, count(distinct a.email) as total,
+            count(distinct case when user_category = 'New_to_CT' then a.email end) as New_to_CT,
+            count(distinct case when user_category = 'Existing_CT' then a.email end) as Existing_CT
+           from user_category a
+           left join base b on a.email = b.email
+           group by 1)
+,final as 
+(select date,
+      (New_to_CT/(total*0.1))*10 as New_to_CT_perc,
+      (Existing_CT/(total*0.1))*10 as Existing_CT_perc
+from final_per  
+order by 1 desc)
+
+,churn_final as (
+select date, installs, uninstalls,  sum(installs) over (order by date) as cum_installs, sum(uninstalls) over (order by date) as cum_uninstalls
+--,100 *(1.0* (select sum(uninstalls) from base where date between  {{beginning}} and date))/ (1.0* (select sum(installs) from base where date between {{beginning}} and date)) as churn
+from churn_base 
+order by 1 desc)
+
+select cf.date, installs, uninstalls, (31884+ cum_uninstalls * 1.0)/(79776 + lead(cum_installs,1) over (order by cf.date desc)) * 100 as churn, New_to_CT_perc, Existing_CT_perc
+from churn_final cf join final f on cf.date = f.date
+where cf.date between {{start_date}} and {{end_date}}
+order by 1 desc
