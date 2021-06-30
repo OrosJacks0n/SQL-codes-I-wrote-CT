@@ -1,0 +1,38 @@
+with events as (
+select email,createtimestamp + interval '330' minute as createtimestamp
+from cleartax_prod.eventtrackingmodel
+where ((year = 2020 and month = 12) or (year = 2021)) and date(createtimestamp + interval '330' minute) >= date('2020-12-09')
+and category in ('Efiling_Black', 'Save_Black') and email is not null)
+
+,base as (SELECT
+    email,createtimestamp
+    , DATE_DIFF('second', lag(createtimestamp) over (PARTITION BY email order by createtimestamp), createtimestamp) as inactivity_time
+from events)
+
+,sessions as (SELECT
+      event.email || '-' || cast(row_number() over(partition by event.email order by event.createtimestamp) as varchar(200)) as session_id
+      , event.email
+      , event.createtimestamp as session_start_at
+      , lead(createtimestamp) over(partition by event.email order by event.createtimestamp) as next_session_start_at
+    FROM
+      base as event
+    WHERE (event.inactivity_time > 1200 OR event.inactivity_time is null))
+    
+,final as (
+  SELECT session_id, date(session_start_at) as date,
+  ((DATE_DIFF('second', MIN(events.createtimestamp), MAX(events.createtimestamp))*0.1)/60*10) AS duration
+  FROM sessions
+  LEFT JOIN events on events.email = sessions.email
+        AND events.createtimestamp >= sessions.session_start_at
+        AND (events.createtimestamp < sessions.next_session_start_at OR sessions.next_session_start_at is null)
+  GROUP BY 1,2
+  )
+    
+SELECT
+  date,
+  COUNT(*) AS "Sessions Count",
+  AVG(duration) AS "AVG Session Duration (in min)"
+FROM final
+where date between date({{Start_date}}) and date({{End_date}})
+group by 1
+order by 1,2 desc
