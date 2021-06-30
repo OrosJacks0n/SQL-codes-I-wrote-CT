@@ -1,0 +1,95 @@
+with cte1 as 
+(
+    select * 
+    from cleartax_prod.apc_black_metrics
+    where date(createtimestamp + interval '330' minute) between date({{start_date}}) and date({{End_date}})
+)
+
+, cte2 as 
+(
+    select email,
+        
+        case 
+            when count(createtimestamp) >= 4 then 'more than 4 times'
+            when count(createtimestamp) = 3 then 'thrice a week'
+            when count(createtimestamp) = 2 then 'twice a week'
+            when count(createtimestamp) = 1 then 'once a week'
+        else '0 times a week'
+        end
+         as user_cohorts 
+
+
+
+    from cte1
+    where referrer = 'SearchScreen'
+        and original_referrer in ('MainScreen' , 'InvestListing')
+        and action = 'ScreenView_SearchScreen'
+    group by 1
+            
+)
+
+, cte3 as 
+(
+    select email, createtimestamp
+    from cte1 
+    where referrer = 'FundPage' and original_referrer = 'SearchScreen'  and action = 'ScreenView_FundPage'
+    group by 1, 2  -- need???
+)
+
+, cte4 as 
+(
+    select cte3.email, count(distinct cte1.createtimestamp) as countPayment
+    from cte1 inner join cte3 
+    on cte1.email = cte3.email 
+    where action in ('_PaymentSuccessful' , '_Payment Successful') 
+        
+        and  ( date_diff('day', cte3.createtimestamp,cte1.createtimestamp) <= 1)
+    group by 1
+
+)
+
+, last_cte as (
+select cte2.email, cte2.user_cohorts, 
+                        case 
+                            when cte3.email IS NULL then 0
+                            else 1 
+                        end as bool_SS_FP,
+                        
+                        case 
+                            when cte4.email IS NOT NULL then 1
+                            else 0 
+                        end as bool_paymnt_suc,
+                        
+                        cte4.countPayment
+                        
+    from cte2 left join cte3 
+        on cte2.email = cte3.email
+            
+            left join cte4 
+                on cte3.email = cte4.email
+    
+    group by 1, 2, 3, 4, 5
+   
+)            
+                            
+
+    
+select user_cohorts, count(distinct email) as LandingOnSS, count (distinct case when bool_SS_FP = 1 then email end ) as VisitsFP , count (distinct case when bool_paymnt_suc = 1 then email end ) as PaymntSucc ,
+    sum (countPayment) as PaymntCount
+from last_cte 
+group by 1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
